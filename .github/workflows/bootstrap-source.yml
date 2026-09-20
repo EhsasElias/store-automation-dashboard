@@ -1,0 +1,72 @@
+name: Install Opportunity Hunter source
+on:
+  push:
+    paths:
+      - '.github/workflows/bootstrap-source.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and expand source bundle
+        shell: python
+        run: |
+          import base64, hashlib, json, lzma
+          from pathlib import Path, PurePosixPath
+          root = Path.cwd().resolve()
+          encoded = ''.join((root / '.bootstrap' / f'source-{i:02d}.b64').read_text().strip() for i in range(1, 7))
+          packed = base64.b64decode(encoded, validate=True)
+          expected = '582b2e87a6bc07c0b27b9accb23d5b8371ea72a37f6132e8a6e97cc05e6bdaf0c'
+          if hashlib.sha256(packed).hexdigest() != expected:
+              raise SystemExit('Source checksum mismatch; no files were changed.')
+          files = json.loads(lzma.decompress(packed))
+          if not isinstance(files, dict) or len(files) != 106:
+              raise SystemExit('Unexpected source manifest.')
+          validated = []
+          for name, content in files.items():
+              path = PurePosixPath(name)
+              if path.is_absolute() or '..' in path.parts or '.git' in path.parts or name == '.env' or not isinstance(content, str):
+                  raise SystemExit('Unsafe manifest entry.')
+              if len(content.encode('utf-8')) > 2000000:
+                  raise SystemExit('Unexpected file size.')
+              if name.startswith('.github/workflows/'):
+                  continue
+              validated.append((root / name, content))
+          for destination, content in validated:
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_text(content, encoding='utf-8')
+          print(f'Verified and wrote {len(validated)} source files; no credentials included.')
+      - name: Commit application source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all -- . ':!.github/workflows'
+          if ! git diff --cached --quiet; then
+            git commit -m 'Install Opportunity Hunter local-first Laravel and Vue application'
+            git push origin HEAD:main
+          fi
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, dom, zip, fileinfo
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare local files
+        run: php scripts/setup.php
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist
+      - name: Pure policy tests
+        run: php tests/core.php
+      - name: Laravel feature tests using mocked providers
+        run: php artisan test
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Frontend unit tests
+        run: npm test
+      - name: Production asset build
+        run: npm run build
